@@ -85,11 +85,13 @@ const verifyToken = async (req, res, next) => {
   try {
     await initDatabase();
 
+    // Prefer cookie-based token (HTTPOnly cookie set by auth system)
     const cookies = req.cookies || {};
     let token = null;
 
+    // Try common cookie names first
     const candidateNames = [
-      "taskhive_session",
+      "skillswap_session",
       "better_auth_session",
       "better-auth-session",
       "session",
@@ -103,6 +105,7 @@ const verifyToken = async (req, res, next) => {
       }
     }
 
+    // If no cookie token, try Authorization header
     if (!token) {
       const authHeader = req.headers.authorization || "";
       const [scheme, hdrToken] = authHeader.split(" ");
@@ -116,6 +119,7 @@ const verifyToken = async (req, res, next) => {
       session = await sessionCollection.findOne({ token });
     }
 
+    // As a fallback, check if any cookie value matches a session token
     if (!session) {
       for (const v of Object.values(cookies)) {
         if (typeof v !== "string") continue;
@@ -193,11 +197,11 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("TaskHive API Server is running successfully");
+  res.send("Skill-Swap API Server is running successfully");
 });
 
 app.get("/api/health", (req, res) => {
-  res.status(200).json({ success: true, message: "TaskHive server is healthy" });
+  res.status(200).json({ success: true, message: "Skill-Swap server is healthy" });
 });
 
 app.get("/api/roles", (req, res) => {
@@ -223,3 +227,196 @@ app.get("/api/protected/admin", verifyToken, verifyAdmin, (req, res) => {
   res.status(200).json({ success: true, message: "Admin access granted", user: req.user });
 });
 
+app.get("/api/tasks", async (req, res) => {
+  try {
+    await initDatabase();
+    const filter = {};
+
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+
+    const tasks = await tasksCollection.find(filter).sort({ createdAt: -1 }).toArray();
+    res.status(200).json({ success: true, data: tasks });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to load tasks" });
+  }
+});
+
+app.post("/api/tasks", verifyToken, verifyClient, async (req, res) => {
+  try {
+    await initDatabase();
+    const payload = req.body || {};
+
+    const task = {
+      title: payload.title,
+      description: payload.description,
+      budget: payload.budget,
+      status: payload.status || "open",
+      clientId: req.user.id,
+      clientEmail: req.user.email,
+      createdAt: new Date(),
+    };
+
+    const result = await tasksCollection.insertOne(task);
+    res.status(201).json({ success: true, insertedId: result.insertedId });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to create task" });
+  }
+});
+
+app.get("/api/tasks/my", verifyToken, verifyClient, async (req, res) => {
+  try {
+    await initDatabase();
+    const tasks = await tasksCollection
+      .find({ clientId: req.user.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json({ success: true, data: tasks });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to load your tasks" });
+  }
+});
+
+app.post("/api/proposals", verifyToken, verifyFreelancer, async (req, res) => {
+  try {
+    await initDatabase();
+    const payload = req.body || {};
+    const taskId = toObjectId(payload.taskId);
+
+    if (!taskId) {
+      return res.status(400).json({ success: false, message: "Invalid taskId" });
+    }
+
+    const task = await tasksCollection.findOne({ _id: taskId });
+
+    if (!task) {
+      return res.status(404).json({ success: false, message: "Task not found" });
+    }
+
+    const proposal = {
+      taskId: task._id.toString(),
+      coverLetter: payload.coverLetter,
+      expectedAmount: payload.expectedAmount,
+      status: "pending",
+      freelancerId: req.user.id,
+      freelancerEmail: req.user.email,
+      createdAt: new Date(),
+    };
+
+    const result = await proposalsCollection.insertOne(proposal);
+    res.status(201).json({ success: true, insertedId: result.insertedId });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to submit proposal" });
+  }
+});
+
+app.get("/api/proposals/my", verifyToken, verifyFreelancer, async (req, res) => {
+  try {
+    await initDatabase();
+    const proposals = await proposalsCollection
+      .find({ freelancerId: req.user.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json({ success: true, data: proposals });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to load your proposals" });
+  }
+});
+
+app.get("/api/proposals/task/:taskId", verifyToken, verifyClient, async (req, res) => {
+  try {
+    await initDatabase();
+    const taskId = toObjectId(req.params.taskId);
+
+    if (!taskId) {
+      return res.status(400).json({ success: false, message: "Invalid taskId" });
+    }
+
+    const task = await tasksCollection.findOne({ _id: taskId });
+
+    if (!task || task.clientId !== req.user.id) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+
+    const proposals = await proposalsCollection
+      .find({ taskId: req.params.taskId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json({ success: true, data: proposals });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to load task proposals" });
+  }
+});
+
+app.post("/api/transactions", verifyToken, verifyClient, async (req, res) => {
+  try {
+    await initDatabase();
+    const payload = req.body || {};
+    const taskId = toObjectId(payload.taskId);
+
+    if (!taskId) {
+      return res.status(400).json({ success: false, message: "Invalid taskId" });
+    }
+
+    const task = await tasksCollection.findOne({ _id: taskId });
+
+    if (!task || task.clientId !== req.user.id) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+
+    const transaction = {
+      taskId: task._id.toString(),
+      proposalId: payload.proposalId,
+      amount: payload.amount,
+      clientId: req.user.id,
+      freelancerId: payload.freelancerId,
+      status: payload.status || "pending",
+      createdAt: new Date(),
+    };
+
+    const result = await transactionsCollection.insertOne(transaction);
+    res.status(201).json({ success: true, insertedId: result.insertedId });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to create transaction" });
+  }
+});
+
+app.get("/api/transactions/my", verifyToken, async (req, res) => {
+  try {
+    await initDatabase();
+    const filter = {};
+
+    if (req.user.role === ROLES.CLIENT) {
+      filter.clientId = req.user.id;
+    } else if (req.user.role === ROLES.FREELANCER) {
+      filter.freelancerId = req.user.id;
+    }
+
+    const transactions = await transactionsCollection.find(filter).sort({ createdAt: -1 }).toArray();
+    res.status(200).json({ success: true, data: transactions });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to load transactions" });
+  }
+});
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: "Route not found",
+  });
+});
+
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    initDatabase()
+      .then(() => console.log("Auth DB ready"))
+      .catch((error) => console.error("Auth DB init failed:", error.message));
+  });
+}
+
+module.exports = app;
