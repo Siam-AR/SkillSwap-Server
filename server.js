@@ -2,6 +2,7 @@ const express = require("express");
 const dotenv = require("dotenv");
 const { MongoClient, ObjectId, ServerApiVersion } = require("mongodb");
 const cookieParser = require("cookie-parser");
+const { buildFreelancerReviewStats } = require("./lib/freelancer-stats");
 
 dotenv.config();
 
@@ -32,6 +33,7 @@ let sessionCollection;
 let tasksCollection;
 let proposalsCollection;
 let transactionsCollection;
+let reviewsCollection;
 
 const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -63,6 +65,44 @@ const normalizeTaskDocument = (task) => {
       name: clientName || clientEmail || "Unknown client",
       email: clientEmail || null,
     },
+  };
+};
+
+const normalizeFreelancerDocument = (user, stats = null) => {
+  if (!user || typeof user !== "object") {
+    return null;
+  }
+
+  const idValue = user._id ?? user.id ?? user.userId ?? null;
+  const name = user.name || user.fullName || user.displayName || user.email || "Freelancer";
+  const email = user.email || null;
+  const skills = Array.isArray(user.skills)
+    ? user.skills.filter(Boolean)
+    : typeof user.skills === "string"
+      ? user.skills
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : [];
+
+  const reviewStats = stats || buildFreelancerReviewStats([], email);
+
+  return {
+    ...user,
+    _id: idValue ? String(idValue) : "",
+    id: idValue ? String(idValue) : "",
+    name,
+    email,
+    role: normalizeRole(user.role),
+    skills,
+    bio: user.bio || user.about || user.description || "",
+    headline: user.headline || user.professionalTitle || user.title || "Available for freelance work",
+    location: user.location || user.city || user.country || "",
+    hourlyRate: user.hourlyRate || user.rate || null,
+    createdAt: user.createdAt || null,
+    rating: reviewStats.rating,
+    reviewCount: reviewStats.reviewCount,
+    finishedJobs: reviewStats.finishedJobs,
   };
 };
 
@@ -189,6 +229,7 @@ const initDatabase = async () => {
     tasksCollection = appDb.collection("tasks");
     proposalsCollection = appDb.collection("proposals");
     transactionsCollection = appDb.collection("transactions");
+    reviewsCollection = appDb.collection("reviews");
 
   } catch (error) {
     console.error("Database connection unavailable; task API will be unavailable.", error.stack || error);
@@ -227,6 +268,24 @@ const buildTaskLookupQuery = (taskId) => {
     orFilters.push({ _id: normalizedTaskId });
     orFilters.push({ taskId: normalizedTaskId });
     orFilters.push({ id: normalizedTaskId });
+  }
+
+  return orFilters.length ? { $or: orFilters } : { _id: null };
+};
+
+const buildUserLookupQuery = (userId) => {
+  const normalizedUserId = String(userId || "").trim();
+  const orFilters = [];
+  const objectId = toObjectId(normalizedUserId);
+
+  if (objectId) {
+    orFilters.push({ _id: objectId });
+  }
+
+  if (normalizedUserId) {
+    orFilters.push({ _id: normalizedUserId });
+    orFilters.push({ userId: normalizedUserId });
+    orFilters.push({ id: normalizedUserId });
   }
 
   return orFilters.length ? { $or: orFilters } : { _id: null };
@@ -358,6 +417,95 @@ app.get("/api/roles", (req, res) => {
     success: true,
     roles: ["Client", "Freelancer", "Admin"],
   });
+});
+
+app.get("/api/freelancers", async (req, res) => {
+  try {
+    await initDatabase();
+
+    if (!usersCollection) {
+      return res.status(503).json({ success: false, message: "User service unavailable" });
+    }
+
+    const page = Math.max(1, Number.parseInt(req.query.page || "1", 10) || 1);
+    const limit = Math.min(9, Math.max(1, Number.parseInt(req.query.limit || "6", 10) || 6));
+    const search = typeof req.query.search === "string" ? req.query.search.trim().toLowerCase() : "";
+    const query = {
+      role: { $regex: "^freelancer$", $options: "i" },
+    };
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: escapeRegex(search), $options: "i" } },
+        { email: { $regex: escapeRegex(search), $options: "i" } },
+        { headline: { $regex: escapeRegex(search), $options: "i" } },
+      ];
+    }
+
+    const totalFreelancers = await usersCollection.countDocuments(query);
+    const totalPages = Math.max(1, Math.ceil(totalFreelancers / limit));
+    const currentPage = Math.min(page, totalPages);
+    const skip = (currentPage - 1) * limit;
+    const docs = await usersCollection
+      .find(query)
+      .sort({ createdAt: -1, _id: -1 })
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
+    const reviews = reviewsCollection ? await reviewsCollection.find({}).toArray() : [];
+    const data = docs
+      .map((user) => {
+        const stats = buildFreelancerReviewStats(reviews, user.email);
+        return normalizeFreelancerDocument(user, stats);
+      })
+      .filter(Boolean);
+
+    return res.status(200).json({
+      success: true,
+      data,
+      pagination: {
+        page: currentPage,
+        limit,
+        totalFreelancers,
+        totalPages,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to load freelancers:", error.stack || error);
+    return res.status(500).json({ success: false, message: "Failed to load freelancers", error: error.message });
+  }
+});
+
+app.get("/api/freelancers/:freelancerId", async (req, res) => {
+  try {
+    await initDatabase();
+
+    if (!usersCollection) {
+      return res.status(503).json({ success: false, message: "User service unavailable" });
+    }
+
+    const freelancerQuery = buildUserLookupQuery(req.params.freelancerId);
+    const freelancer = await usersCollection.findOne({
+      ...freelancerQuery,
+      role: { $regex: "^freelancer$", $options: "i" },
+    });
+
+    if (!freelancer) {
+      return res.status(404).json({ success: false, message: "Freelancer not found" });
+    }
+
+    const reviews = reviewsCollection ? await reviewsCollection.find({}).toArray() : [];
+    const stats = buildFreelancerReviewStats(reviews, freelancer?.email);
+
+    return res.status(200).json({
+      success: true,
+      data: normalizeFreelancerDocument(freelancer, stats),
+    });
+  } catch (error) {
+    console.error("Failed to load freelancer details:", error.stack || error);
+    return res.status(500).json({ success: false, message: "Failed to load freelancer details", error: error.message });
+  }
 });
 
 app.get("/api/auth/me", verifyToken, (req, res) => {
