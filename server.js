@@ -43,13 +43,12 @@ const normalizeTaskDocument = (task) => {
   }
 
   const idValue = task._id ?? task.id ?? task.taskId ?? null;
-  const clientEmail = task.clientEmail || task.client_email || task.client?.email || task.clientEmail || null;
-  const clientName = task.clientName || task.client_name || task.client?.name || task.clientName || null;
+  const clientEmail = task.clientEmail || task.client?.email || null;
   const category = task.category || task.type || "General";
   const budget = Number(task.budget ?? task.amount ?? 0);
   const status = String(task.status || "open").trim().toLowerCase();
 
-  return {
+  const normalizedTask = {
     ...task,
     _id: idValue ? String(idValue) : "",
     id: idValue ? String(idValue) : "",
@@ -59,13 +58,13 @@ const normalizeTaskDocument = (task) => {
     budget,
     status,
     deadline: task.deadline || task.dueDate || null,
-    clientEmail,
-    clientName,
-    client: {
-      name: clientName || clientEmail || "Unknown client",
-      email: clientEmail || null,
-    },
   };
+
+  if (clientEmail) {
+    normalizedTask.clientEmail = clientEmail;
+  }
+
+  return normalizedTask;
 };
 
 const normalizeFreelancerDocument = (user, stats = null) => {
@@ -180,6 +179,23 @@ const extractAuthToken = (req) => {
     const value = signedCookies[name] || cookies[name] || parsedCookies[name];
     if (typeof value === "string" && value.trim()) {
       return value.trim();
+    }
+  }
+
+  return null;
+};
+
+const findSessionByToken = async (sessionCollectionRef, token) => {
+  if (!sessionCollectionRef || !token) {
+    return null;
+  }
+
+  const candidateFields = ["token", "sessionToken", "session_token", "session-token"];
+
+  for (const field of candidateFields) {
+    const session = await sessionCollectionRef.findOne({ [field]: token });
+    if (session) {
+      return session;
     }
   }
 
@@ -317,7 +333,7 @@ const verifyToken = async (req, res, next) => {
 
     let session = null;
     if (token) {
-      session = await sessionCollection.findOne({ token });
+      session = await findSessionByToken(sessionCollection, token);
     }
 
     if (!session) {
@@ -326,7 +342,7 @@ const verifyToken = async (req, res, next) => {
         if (typeof v !== "string") continue;
         const trimmed = v.trim();
         if (!trimmed) continue;
-        const s = await sessionCollection.findOne({ token: trimmed });
+        const s = await findSessionByToken(sessionCollection, trimmed);
         if (s) {
           session = s;
           token = trimmed;
@@ -658,14 +674,22 @@ app.post("/api/tasks", verifyToken, verifyClient, async (req, res) => {
   try {
     await initDatabase();
     const payload = req.body || {};
+    const normalizedCategory = String(payload.category || payload.type || payload.taskCategory || payload.selectedCategory || "Other").trim() || "Other";
+    const normalizedDeadline = String(payload.deadline || payload.dueDate || payload.deadlineDate || "" ).trim() || null;
+    const normalizedDescription = String(payload.description || payload.summary || "").trim();
+    const normalizedBudget = Number(payload.budget ?? payload.amount ?? 0);
+
+    console.log("Creating task payload", { payload, normalizedCategory, normalizedDeadline });
 
     const task = {
       title: payload.title,
-      description: payload.description,
-      budget: payload.budget,
+      description: normalizedDescription,
+      category: normalizedCategory,
+      budget: normalizedBudget,
+      deadline: normalizedDeadline,
       status: payload.status || "open",
       clientId: req.user.id,
-      clientEmail: req.user.email,
+      ...(req.user.email ? { clientEmail: req.user.email } : {}),
       createdAt: new Date(),
     };
 
