@@ -67,6 +67,45 @@ const normalizeTaskDocument = (task) => {
   return normalizedTask;
 };
 
+const normalizeProposalDocument = (doc) => {
+  if (!doc || typeof doc !== "object") return null;
+
+  const idValue = doc._id ?? doc.id ?? null;
+  let idStr = "";
+  if (idValue) {
+    if (typeof idValue === "object" && typeof idValue.toHexString === "function") {
+      idStr = idValue.toHexString();
+    } else if (typeof idValue === "object" && typeof idValue.toString === "function") {
+      const s = idValue.toString();
+      if (s.startsWith("ObjectId(") && s.endsWith(")")) idStr = s.slice(9, -1).replace(/['\"]/g, "");
+      else idStr = s;
+    } else {
+      idStr = String(idValue);
+    }
+  }
+
+  const freelancerId = doc.freelancer_id || doc.freelancerId || doc.freelancer || "";
+  const freelancerEmail = doc.freelancer_email || doc.freelancerEmail || doc.freelancer || "";
+  const freelancerName = doc.freelancer_name || doc.freelancerName || doc.freelancer_full_name || freelancerEmail || "";
+
+  const normalized = {
+    ...doc,
+    _id: idStr,
+    id: idStr,
+    proposalId: idStr,
+    task_id: doc.task_id || doc.taskId || doc.task || "",
+    taskId: doc.task_id || doc.taskId || doc.task || "",
+    freelancer_id: String(freelancerId || ""),
+    freelancerId: String(freelancerId || ""),
+    freelancer_email: String(freelancerEmail || ""),
+    freelancerEmail: String(freelancerEmail || ""),
+    freelancer_name: String(freelancerName || ""),
+    freelancerName: String(freelancerName || ""),
+  };
+
+  return normalized;
+};
+
 const normalizeFreelancerDocument = (user, stats = null) => {
   if (!user || typeof user !== "object") {
     return null;
@@ -123,6 +162,7 @@ const getTrustedUserFromHeaders = (req) => {
   const userId = req?.headers?.["x-user-id"] || req?.headers?.["X-User-Id"] || "";
   const email = req?.headers?.["x-user-email"] || req?.headers?.["X-User-Email"] || "";
   const role = req?.headers?.["x-user-role"] || req?.headers?.["X-User-Role"] || "";
+  const name = req?.headers?.["x-user-name"] || req?.headers?.["X-User-Name"] || req?.headers?.["x-user-display-name"] || req?.headers?.["X-User-Display-Name"] || "";
 
   if (!userId && !email && !role) {
     return null;
@@ -131,7 +171,7 @@ const getTrustedUserFromHeaders = (req) => {
   return {
     id: String(userId || email || "guest"),
     email: String(email || ""),
-    name: String(email || "Authenticated user"),
+    name: String(name || email || "Authenticated user"),
     role: normalizeRole(role),
   };
 };
@@ -247,6 +287,44 @@ const initDatabase = async () => {
     transactionsCollection = appDb.collection("transactions");
     reviewsCollection = appDb.collection("reviews");
 
+    // Ensure unique constraint to prevent duplicate proposals per freelancer+task
+    try {
+      // Remove duplicates where freelancer_id is present (keep the most recent per task_id+freelancer_id)
+      try {
+        const dupPipeline = [
+          { $match: { task_id: { $exists: true, $ne: null }, freelancer_id: { $exists: true, $ne: null } } },
+          { $group: { _id: { task_id: "$task_id", freelancer_id: "$freelancer_id" }, ids: { $push: { id: "$_id", createdAt: "$createdAt", submitted_at: "$submitted_at" } }, count: { $sum: 1 } } },
+          { $match: { count: { $gt: 1 } } },
+        ];
+
+        const cursor = proposalsCollection.aggregate(dupPipeline, { allowDiskUse: true });
+        let totalRemoved = 0;
+        while (await cursor.hasNext()) {
+          const grp = await cursor.next();
+          const docs = (grp.ids || []).map((d) => ({ _id: d.id, ts: d.createdAt || d.submitted_at || new Date(0) }));
+          docs.sort((a, b) => new Date(b.ts) - new Date(a.ts)); // keep most recent
+          const keep = docs[0]._id;
+          const remove = docs.slice(1).map((d) => d._id);
+          if (remove.length) {
+            const res = await proposalsCollection.deleteMany({ _id: { $in: remove } });
+            totalRemoved += res.deletedCount || 0;
+            console.log(`Dedupe: removed ${res.deletedCount || 0} old proposals for task_id=${grp._id.task_id} freelancer_id=${grp._id.freelancer_id}`);
+          }
+        }
+        if (totalRemoved) console.log('Dedupe complete. Total removed:', totalRemoved);
+      } catch (dedupeErr) {
+        console.warn('Dedupe step failed:', dedupeErr && dedupeErr.message);
+      }
+
+      // Create a partial unique index where freelancer_id is a string (avoids matching nulls)
+      await proposalsCollection.createIndex(
+        { task_id: 1, freelancer_id: 1 },
+        { unique: true, partialFilterExpression: { freelancer_id: { $type: "string" } } }
+      );
+    } catch (indexErr) {
+      console.warn('Could not create proposals unique index:', indexErr && indexErr.message);
+    }
+
   } catch (error) {
     console.error("Database connection unavailable; task API will be unavailable.", error.stack || error);
     usersCollection = null;
@@ -349,6 +427,9 @@ const buildUserLookupQuery = (userId) => {
     orFilters.push({ _id: normalizedUserId });
     orFilters.push({ userId: normalizedUserId });
     orFilters.push({ id: normalizedUserId });
+    if (normalizedUserId.includes("@")) {
+      orFilters.push({ email: normalizedUserId.toLowerCase() });
+    }
   }
 
   return orFilters.length ? { $or: orFilters } : { _id: null };
@@ -422,7 +503,7 @@ const verifyToken = async (req, res, next) => {
     req.user = {
       id: String(user._id),
       email: user.email,
-      name: user.name,
+      name: String(user.name || user.fullName || user.displayName || user.email || "").trim(),
       role: normalizeRole(user.role),
     };
 
@@ -684,8 +765,10 @@ app.get("/api/proposals/check/:taskId", verifyToken, verifyFreelancer, async (re
 
     if (proposalsCollection) {
       const existingProposal = await proposalsCollection.findOne({
-        taskId,
-        freelancerId: req.user.id,
+        $or: [
+          { taskId, freelancerId: req.user.id },
+          { task_id: taskId, freelancer_id: req.user.id },
+        ],
       });
 
       return res.status(200).json({ success: true, hasSubmitted: Boolean(existingProposal) });
@@ -817,8 +900,11 @@ app.post("/api/tasks", verifyToken, verifyClient, async (req, res) => {
 app.post("/api/proposals", verifyToken, verifyFreelancer, async (req, res) => {
   try {
     await initDatabase();
+
     const payload = req.body || {};
-    const taskId = payload.taskId;
+
+    // Accept either snake_case or camelCase task id fields
+    const taskId = String(payload.task_id || payload.taskId || payload.id || "").trim();
 
     if (!taskId) {
       return res.status(400).json({ success: false, message: "Invalid taskId" });
@@ -835,29 +921,77 @@ app.post("/api/proposals", verifyToken, verifyFreelancer, async (req, res) => {
       return res.status(404).json({ success: false, message: "Task not found" });
     }
 
+    // sanitize and normalize incoming fields
+    const now = new Date();
+    const clientEmail = String(task.clientEmail || task.client?.email || "").trim();
+    const clientId = String(task.clientId || task.client?._id || "").trim();
+
+    const coverNote = String(payload.cover_note || payload.coverLetter || payload.coverNote || "").trim();
+    const proposedBudget = Number(payload.proposed_budget ?? payload.expectedAmount ?? payload.proposedBudget ?? 0);
+    const estimatedDays = Number(payload.estimated_days ?? payload.estimatedDays ?? 0);
+
+    if (!Number.isFinite(proposedBudget) || proposedBudget < 0) {
+      return res.status(400).json({ success: false, message: "Invalid proposed budget" });
+    }
+
+    if (!Number.isFinite(estimatedDays) || estimatedDays < 0) {
+      return res.status(400).json({ success: false, message: "Invalid estimated days" });
+    }
+
+    // Check existing proposal by canonical fields only
     const existingProposal = await proposalsCollection.findOne({
-      taskId: task._id.toString(),
-      freelancerId: req.user.id,
+      task_id: task._id.toString(),
+      freelancer_id: req.user.id,
     });
 
     if (existingProposal) {
       return res.status(409).json({ success: false, message: "You already submitted a proposal for this task" });
     }
 
+    // Ensure freelancer display name is populated from auth headers or user record
+    let freelancerDisplayName = String(req.user.name || "").trim();
+    try {
+      if (usersCollection && req.user && req.user.id) {
+        const userQuery = buildUserLookupQuery(req.user.id);
+        const userRec = await usersCollection.findOne(userQuery);
+        if (userRec) {
+          freelancerDisplayName = String(userRec.name || userRec.fullName || userRec.displayName || userRec.email || "").trim();
+        }
+      }
+    } catch (nameErr) {
+      console.warn('Failed to lookup freelancer name:', nameErr && nameErr.message);
+    }
+
+    // Build canonical proposal object (snake_case) for client compatibility
     const proposal = {
-      taskId: task._id.toString(),
-      coverLetter: payload.coverLetter,
-      expectedAmount: payload.expectedAmount,
+      task_id: task._id.toString(),
+      task_title: String(task.title || task.name || "").trim(),
+      cover_note: coverNote,
+      proposed_budget: proposedBudget,
+      estimated_days: estimatedDays,
       status: "pending",
-      freelancerId: req.user.id,
-      freelancerEmail: req.user.email,
-      createdAt: new Date(),
+      freelancer_id: String(req.user.id || "").trim(),
+      freelancer_email: String(req.user.email || "").trim(),
+      freelancer_name: String(freelancerDisplayName || req.user.email || "Freelancer").trim(),
+      submitted_at: now.toISOString(),
+      createdAt: now,
+      updatedAt: now,
+      client_email: clientEmail,
+      client_id: clientId,
     };
 
-    const result = await proposalsCollection.insertOne(proposal);
-    return res.status(201).json({ success: true, insertedId: result.insertedId });
+    try {
+      const result = await proposalsCollection.insertOne(proposal);
+      return res.status(201).json({ success: true, insertedId: result.insertedId });
+    } catch (insertErr) {
+      // handle unique index violation gracefully
+      if (insertErr && insertErr.code === 11000) {
+        return res.status(409).json({ success: false, message: "You already submitted a proposal for this task" });
+      }
+      throw insertErr;
+    }
   } catch (error) {
-    console.error("Proposal submission failed:", error);
+    console.error("Proposal submission failed:", error && error.stack ? error.stack : error);
     res.status(500).json({ success: false, message: error?.message || "Failed to submit proposal" });
   }
 });
@@ -866,11 +1000,17 @@ app.get("/api/proposals/my", verifyToken, verifyFreelancer, async (req, res) => 
   try {
     await initDatabase();
     const proposals = await proposalsCollection
-      .find({ freelancerId: req.user.id })
+      .find({
+        $or: [
+          { freelancerId: req.user.id },
+          { freelancer_id: req.user.id },
+        ],
+      })
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.status(200).json({ success: true, data: proposals });
+    const normalized = proposals.map((p) => normalizeProposalDocument(p)).filter(Boolean);
+    res.status(200).json({ success: true, data: normalized });
   } catch (error) {
     res.status(500).json({ success: false, message: "Failed to load your proposals" });
   }
@@ -892,11 +1032,17 @@ app.get("/api/proposals/task/:taskId", verifyToken, verifyClient, async (req, re
     }
 
     const proposals = await proposalsCollection
-      .find({ taskId: req.params.taskId })
+      .find({
+        $or: [
+          { taskId: req.params.taskId },
+          { task_id: req.params.taskId },
+        ],
+      })
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.status(200).json({ success: true, data: proposals });
+    const normalized = proposals.map((p) => normalizeProposalDocument(p)).filter(Boolean);
+    res.status(200).json({ success: true, data: normalized });
   } catch (error) {
     res.status(500).json({ success: false, message: "Failed to load task proposals" });
   }
