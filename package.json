@@ -1,5 +1,5 @@
 {
-  "name": "task-hive-server",
+  "name": "taskify-server",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -22,3 +22,4 @@
     "nodemon": "^3.1.14"
   }
 }
+

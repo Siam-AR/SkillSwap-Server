@@ -229,7 +229,7 @@ const extractAuthToken = (req) => {
     "better-auth.session-token",
     "better_auth_session",
     "better-auth-session",
-    "skillswap_session",
+    "taskify_session",
     "session_token",
     "session",
     "token",
@@ -584,11 +584,11 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("Skill-Swap API Server is running successfully");
+  res.send("Taskify API Server is running successfully");
 });
 
 app.get("/api/health", (req, res) => {
-  res.status(200).json({ success: true, message: "Skill-Swap server is healthy" });
+  res.status(200).json({ success: true, message: "Taskify server is healthy" });
 });
 
 app.get("/api/roles", (req, res) => {
