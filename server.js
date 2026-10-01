@@ -58,6 +58,7 @@ const normalizeTaskDocument = (task) => {
     category,
     budget,
     status,
+    imageUrl: task.imageUrl || task.image || null,
     deadline: task.deadline || task.dueDate || null,
   };
 
@@ -419,6 +420,7 @@ const handleTaskUpdate = async (taskId, req, res) => {
   const normalizedDescription = String(payload.description || payload.summary || existingTask.description || "").trim();
   const normalizedBudget = Number(payload.budget ?? payload.amount ?? existingTask.budget ?? 0);
   const normalizedTitle = String(payload.title || existingTask.title || "").trim();
+  const normalizedImageUrl = payload.imageUrl !== undefined ? payload.imageUrl : existingTask.imageUrl || null;
 
   const updatePayload = {
     title: normalizedTitle,
@@ -426,6 +428,7 @@ const handleTaskUpdate = async (taskId, req, res) => {
     category: normalizedCategory,
     budget: normalizedBudget,
     deadline: normalizedDeadline,
+    imageUrl: normalizedImageUrl,
     updatedAt: new Date(),
   };
 
@@ -1176,6 +1179,7 @@ app.post("/api/tasks", verifyToken, verifyClient, async (req, res) => {
     const normalizedDeadline = String(payload.deadline || payload.dueDate || payload.deadlineDate || "" ).trim() || null;
     const normalizedDescription = String(payload.description || payload.summary || "").trim();
     const normalizedBudget = Number(payload.budget ?? payload.amount ?? 0);
+    const normalizedImageUrl = payload.imageUrl || null;
 
     console.log("POST /api/tasks req.user", req.user);
     console.log("POST /api/tasks payload", { payload, normalizedCategory, normalizedDeadline });
@@ -1186,6 +1190,7 @@ app.post("/api/tasks", verifyToken, verifyClient, async (req, res) => {
       category: normalizedCategory,
       budget: normalizedBudget,
       deadline: normalizedDeadline,
+      imageUrl: normalizedImageUrl,
       status: payload.status || "open",
       clientId: req.user.id,
       ...(req.user.email ? { clientEmail: req.user.email } : {}),
