@@ -38,6 +38,14 @@ let reviewsCollection;
 
 const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const defaultCategoryImages = {
+  Development: "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=600&q=80",
+  Design: "https://images.unsplash.com/photo-1561070791-2526d30994b5?auto=format&fit=crop&w=600&q=80",
+  Writing: "https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=600&q=80",
+  Marketing: "https://images.unsplash.com/photo-1460925895917-afdab827c52f?auto=format&fit=crop&w=600&q=80",
+  Default: "https://images.unsplash.com/photo-1486312338219-ce68d2c6f44d?auto=format&fit=crop&w=600&q=80"
+};
+
 const normalizeTaskDocument = (task) => {
   if (!task || typeof task !== "object") {
     return null;
@@ -58,7 +66,7 @@ const normalizeTaskDocument = (task) => {
     category,
     budget,
     status,
-    imageUrl: task.imageUrl || task.image || null,
+    imageUrl: task.imageUrl || task.image || defaultCategoryImages[category] || defaultCategoryImages.Default,
     deadline: task.deadline || task.dueDate || null,
   };
 
