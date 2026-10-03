@@ -1120,9 +1120,46 @@ app.get("/api/tasks/:taskId", async (req, res) => {
       return res.status(404).json({ success: false, message: "Task not found" });
     }
 
+    let clientData = null;
+    if (usersCollection && (task.clientId || task.clientEmail)) {
+      const clientQuery = {};
+      if (task.clientId) {
+        const cId = String(task.clientId);
+        clientQuery.$or = [{ _id: ObjectId.isValid(cId) ? new ObjectId(cId) : cId }, { _id: cId }];
+      } else if (task.clientEmail) {
+        clientQuery.email = task.clientEmail;
+      }
+      const c = await usersCollection.findOne(clientQuery);
+      if (c) {
+        clientData = {
+          _id: String(c._id),
+          name: c.name || c.fullName || c.displayName || c.email || "Verified Client",
+          email: c.email || task.clientEmail || "",
+          image: c.image || c.avatar || null,
+          createdAt: c.createdAt || null
+        };
+      }
+    }
+
+    const normalizedTask = normalizeTaskDocument(task);
+    if (clientData) {
+      normalizedTask.client = clientData;
+    }
+
+    let proposalsCount = 0;
+    if (proposalsCollection) {
+      proposalsCount = await proposalsCollection.countDocuments({
+        $or: [
+          { taskId: String(task._id) },
+          { task_id: String(task._id) },
+        ],
+      });
+    }
+    normalizedTask.proposalsCount = proposalsCount;
+
     return res.status(200).json({
       success: true,
-      data: normalizeTaskDocument(task),
+      data: normalizedTask,
     });
   } catch (error) {
     console.error("Failed to load task details:", error.stack || error);
