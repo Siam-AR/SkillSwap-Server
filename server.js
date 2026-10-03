@@ -618,8 +618,11 @@ app.get("/api/freelancers", async (req, res) => {
     }
 
     const page = Math.max(1, Number.parseInt(req.query.page || "1", 10) || 1);
-    const limit = Math.min(9, Math.max(1, Number.parseInt(req.query.limit || "6", 10) || 6));
+    const limit = Math.min(24, Math.max(1, Number.parseInt(req.query.limit || "8", 10) || 8));
     const search = typeof req.query.search === "string" ? req.query.search.trim().toLowerCase() : "";
+    const skill = typeof req.query.skill === "string" ? req.query.skill.trim() : "";
+    const sort = typeof req.query.sort === "string" ? req.query.sort.trim() : "";
+    
     const query = {
       role: { $regex: "^freelancer$", $options: "i" },
     };
@@ -629,7 +632,22 @@ app.get("/api/freelancers", async (req, res) => {
         { name: { $regex: escapeRegex(search), $options: "i" } },
         { email: { $regex: escapeRegex(search), $options: "i" } },
         { headline: { $regex: escapeRegex(search), $options: "i" } },
+        { designation: { $regex: escapeRegex(search), $options: "i" } },
       ];
+    }
+
+    if (skill) {
+      query.skills = { $regex: `^${escapeRegex(skill)}$`, $options: "i" };
+    }
+
+    let sortOption = { createdAt: -1, _id: -1 };
+    if (sort === "most-completed") {
+      sortOption = { completedTasks: -1, finishedJobs: -1, createdAt: -1, _id: -1 };
+    } else if (sort === "newest") {
+      sortOption = { createdAt: -1, _id: -1 };
+    } else {
+      // Default: Top Rated
+      sortOption = { rating: -1, reviewsCount: -1, _id: -1 };
     }
 
     const totalFreelancers = await usersCollection.countDocuments(query);
@@ -638,7 +656,7 @@ app.get("/api/freelancers", async (req, res) => {
     const skip = (currentPage - 1) * limit;
     const docs = await usersCollection
       .find(query)
-      .sort({ createdAt: -1, _id: -1 })
+      .sort(sortOption)
       .skip(skip)
       .limit(limit)
       .toArray();
@@ -700,6 +718,43 @@ app.get("/api/freelancers/:freelancerId", async (req, res) => {
 
 app.get("/api/auth/me", verifyToken, (req, res) => {
   res.status(200).json({ success: true, user: req.user });
+});
+
+app.put("/api/users/profile", verifyToken, async (req, res) => {
+  try {
+    await initDatabase();
+    if (!usersCollection) {
+      return res.status(503).json({ success: false, message: "Database not initialized" });
+    }
+    const { userId, designation, hourlyRate, bio, skills } = req.body;
+    
+    // Ensure the authenticated user is updating their own profile, or fallback to token ID
+    const targetUserId = userId || req.user.id;
+    if (String(targetUserId) !== String(req.user.id)) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+
+    const userQuery = buildUserLookupQuery(targetUserId);
+    const existingUser = await usersCollection.findOne(userQuery);
+    
+    if (!existingUser) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const updatePayload = {};
+    if (designation !== undefined) updatePayload.designation = designation;
+    if (hourlyRate !== undefined) updatePayload.hourlyRate = Number(hourlyRate);
+    if (bio !== undefined) updatePayload.bio = bio;
+    if (skills !== undefined) updatePayload.skills = Array.isArray(skills) ? skills : [skills];
+
+    await usersCollection.updateOne(userQuery, { $set: updatePayload });
+    const updatedUser = await usersCollection.findOne(userQuery);
+
+    return res.status(200).json({ success: true, data: updatedUser });
+  } catch (error) {
+    console.error("Failed to update profile:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 app.get("/api/protected/client", verifyToken, verifyClient, (req, res) => {
