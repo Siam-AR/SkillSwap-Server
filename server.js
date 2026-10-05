@@ -144,7 +144,7 @@ const normalizeFreelancerDocument = (user, stats = null) => {
     role: normalizeRole(user.role),
     skills,
     bio: user.bio || user.about || user.description || "",
-    headline: user.headline || user.professionalTitle || user.title || "Available for freelance work",
+    headline: user.designation || user.headline || user.professionalTitle || user.title || "Available for freelance work",
     location: user.location || user.city || user.country || "",
     hourlyRate: user.hourlyRate || user.rate || null,
     status: user.status || user.availabilityStatus || "available",
