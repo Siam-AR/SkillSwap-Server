@@ -150,9 +150,9 @@ const normalizeFreelancerDocument = (user, stats = null) => {
     status: user.status || user.availabilityStatus || "available",
     availabilityStatus: user.availabilityStatus || user.status || "available",
     createdAt: user.createdAt || null,
-    rating: reviewStats.rating,
-    reviewCount: reviewStats.reviewCount,
-    finishedJobs: reviewStats.finishedJobs,
+    rating: user.rating || reviewStats.rating,
+    reviewCount: user.reviewCount || user.reviewsCount || reviewStats.reviewCount,
+    finishedJobs: user.completedTasks || user.finishedJobs || reviewStats.finishedJobs,
   };
 };
 
